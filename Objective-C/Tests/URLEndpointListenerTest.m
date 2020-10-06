@@ -925,6 +925,44 @@ typedef CBLURLEndpointListener Listener;
     [self stopListener: listener];
 }
 
+- (void) testClientCertAuthRootCertsWithMatchingChainedCredentials {
+    if (!self.keyChainAccessAllowed) return;
+    
+    NSError* err = nil;
+    NSData* data = [self dataFromResource: @"identity/certs" ofType: @"p12"];
+    __block CBLTLSIdentity* identity;
+    [self ignoreException: ^{
+        NSError* error = nil;
+        identity = [CBLTLSIdentity importIdentityWithData: data password: @"123"
+                                                    label: kServerCertLabel error:&error];
+        AssertNil(error);
+    }];
+    
+//    CBLListenerCertificateAuthenticator* listenerAuth =
+//    [[CBLListenerCertificateAuthenticator alloc] initWithRootCerts: @[(id)(identity.certs[1])]];
+    // Listener:
+    Config* config = [[Config alloc] initWithDatabase: self.otherDB];
+    config.tlsIdentity = identity;
+    Listener* listener = [self listen: config]; // auth: listenerAuth];
+    AssertNotNil(listener);
+    
+    // Start Replicator:
+    [self ignoreException: ^{
+        [self runWithTarget: listener.localEndpoint
+                       type: kCBLReplicatorTypePushAndPull
+                 continuous: NO
+              authenticator:  [[CBLClientCertificateAuthenticator alloc] initWithIdentity: identity]
+                 serverCert: nil // (__bridge SecCertificateRef) listener.tlsIdentity.certs[1]
+                  errorCode: 0
+                errorDomain: nil];
+    }];
+
+    // Cleanup:
+    Assert([CBLTLSIdentity deleteIdentityWithLabel: kServerCertLabel error: &err]);
+    
+    [self stopListener: listener];
+}
+
 - (void) testClientCertAuthRootCertsError {
     if (!self.keyChainAccessAllowed) return;
     
@@ -1493,10 +1531,33 @@ typedef CBLURLEndpointListener Listener;
     
     AssertNotNil(_listener.tlsIdentity);
     AssertEqual(_listener.tlsIdentity, config.tlsIdentity);
+    AssertEqual(_listener.tlsIdentity.certs.count, 2u);
     
     // make sure, replication works
     [self generateDocumentWithID: @"doc-1"];
     AssertEqual(self.otherDB.count, 0);
+    
+    // refuse without cert
+    [self runWithTarget: _listener.localEndpoint
+                   type: kCBLReplicatorTypePushAndPull
+             continuous: NO
+          authenticator: nil
+             serverCert: (__bridge SecCertificateRef) _listener.tlsIdentity.certs[1]
+              errorCode: CBLErrorTLSCertUnknownRoot
+            errorDomain: CBLErrorDomain];
+    AssertEqual(self.otherDB.count, 0);
+    
+    // refuse the root cert
+    [self runWithTarget: _listener.localEndpoint
+                   type: kCBLReplicatorTypePushAndPull
+             continuous: NO
+          authenticator: nil
+             serverCert: (__bridge SecCertificateRef) _listener.tlsIdentity.certs[1]
+              errorCode: CBLErrorTLSCertUnknownRoot
+            errorDomain: CBLErrorDomain];
+    AssertEqual(self.otherDB.count, 0);
+    
+    // accept the leaf cert
     [self runWithTarget: _listener.localEndpoint
                    type: kCBLReplicatorTypePushAndPull
              continuous: NO
